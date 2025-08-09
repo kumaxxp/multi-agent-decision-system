@@ -10,10 +10,17 @@ ENV/
 
 # Environment variables
 .env
+.env.local
+.env.demo
+.env.example
+.env.lmstudio
 
-# Logs
+# Logs and generated output files
 conversation_logs/
+intelligent_collaboration_logs/
+html_reports/
 *.log
+*.out
 
 # IDE
 .vscode/
@@ -24,3 +31,34 @@ conversation_logs/
 # OS
 .DS_Store
 Thumbs.db
+*~
+.directory
+.Trash-*
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Model files (if any large model files are downloaded)
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Application specific
+*.pid
+*.seed
+*.pid.lock
+
+# Streamlit
+.streamlit/secrets.toml

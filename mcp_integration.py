@@ -39,6 +39,10 @@ class RealMCPIntegration:
             
         return tools_status
     
+    def get_available_tools(self) -> Dict[str, bool]:
+        """利用可能なツールを取得"""
+        return self.available_tools
+    
     def search_library_documentation(self, library_name: str, topic: str = None) -> str:
         """Context7を使ってライブラリドキュメントを検索"""
         if not self.available_tools.get("context7"):
