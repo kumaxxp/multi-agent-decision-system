@@ -1,0 +1,13 @@
+# Multi-Agent Decision System Dependencies
+
+# AutoGen - Microsoft's multi-agent framework (Python 3.12 compatible)
+pyautogen
+
+# LLM Integration
+openai
+
+# Local Model Support (GGUF files)
+llama-cpp-python
+
+# Utilities
+python-dotenv

@@ -1,58 +1,60 @@
 """
-Main entry point for the Multi-Agent Decision System.
-
-This module sets up the AutoGen agents and integrates ReDel for logging and visualization.
-The detailed design is described in the accompanying design_spec.md file.
+Main entry point for the Multi-Agent Decision System with local model support.
+LM Studioでダウンロードしたモデルファイルを直接使用します。
 """
 
 import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from autogen import ConversableAgent, GroupChat, GroupChatManager
 from agents import create_speaker_agent, create_verifier_agent, create_judge_agent
 import json
 from datetime import datetime
+from local_llm import get_local_llm_config, local_llm_wrapper
 
 
-def get_llm_config() -> Dict[str, Any]:
-    """Get LLM configuration for agents."""
-    # LM Studioまたは他のOpenAI互換APIを使用
-    base_url = os.environ.get("API_BASE_URL", None)
+def setup_agents_with_local_llm(llm_config: Dict[str, Any]):
+    """ローカルLLMを使用してエージェントをセットアップ"""
     
-    config = {
-        "model": os.environ.get("MODEL_NAME", "gpt-3.5-turbo"),
-        "api_key": os.environ.get("OPENAI_API_KEY", "lm-studio"),
-        "temperature": float(os.environ.get("TEMPERATURE", "0.7")),
+    # カスタムLLMラッパーを使用する設定
+    custom_config = {
+        "config_list": [{
+            "model": "local-model",
+            "api_type": "custom",
+            "base_url": "custom",
+            "api_key": "not-needed",
+        }],
+        "functions": None,
+        "timeout": 600,
+        "temperature": llm_config.get("temperature", 0.7),
+        "max_tokens": llm_config.get("max_tokens", 512),
     }
     
-    # base_urlが設定されている場合（LM Studioなど）
-    if base_url:
-        config["base_url"] = base_url
-        print(f"ローカルLLMを使用: {base_url}")
-        print(f"モデル: {config['model']}")
+    # カスタムLLMクライアントを設定
+    wrapper = local_llm_wrapper(llm_config)
     
-    return config
-
-
-def setup_agents(llm_config: Dict[str, Any]):
-    """Set up and return the three agents defined in the design."""
-    speaker = create_speaker_agent(llm_config)
-    verifier = create_verifier_agent(llm_config)
-    judge = create_judge_agent(llm_config)
+    # 各エージェントにカスタムクライアントを設定
+    speaker = create_speaker_agent(custom_config)
+    speaker.client = wrapper
+    
+    verifier = create_verifier_agent(custom_config)
+    verifier.client = wrapper
+    
+    judge = create_judge_agent(custom_config)
+    judge.client = wrapper
+    
     return speaker, verifier, judge
 
 
 def create_sequential_chat(agents, max_round: int = 5):
-    """Create a sequential group chat with specified agent order."""
-    # Sequential Workflowを実現するために、発言順序を制御
+    """Sequential Workflowを実現するグループチャット"""
     speaker, verifier, judge = agents
     
     def speaker_selector(last_speaker, group_chat):
-        """Control the speaking order: user -> speaker -> verifier -> judge"""
+        """発言順序を制御: user -> speaker -> verifier -> judge"""
         messages = group_chat.messages
         
         if len(messages) <= 1:
-            # 最初の発言は語り手
             return speaker
         
         last_name = last_speaker.name if last_speaker else None
@@ -62,10 +64,8 @@ def create_sequential_chat(agents, max_round: int = 5):
         elif last_name == "相槌役":
             return judge
         elif last_name == "判定役":
-            # 判定役の後は語り手に戻る（ただし終了条件があれば終了）
             return None
         else:
-            # ユーザーまたは初回
             return speaker
     
     group_chat = GroupChat(
@@ -76,16 +76,17 @@ def create_sequential_chat(agents, max_round: int = 5):
         allow_repeat_speaker=False,
     )
     
+    # GroupChatManagerにもカスタムLLM設定を適用
     manager = GroupChatManager(
         groupchat=group_chat,
-        llm_config=llm_config,
+        llm_config=False,  # マネージャー自体はLLMを使わない
     )
     
     return group_chat, manager
 
 
 def save_conversation_log(messages, session_id: str):
-    """Save conversation messages to a JSON file for later analysis."""
+    """対話ログをJSON形式で保存"""
     log_dir = "conversation_logs"
     os.makedirs(log_dir, exist_ok=True)
     
@@ -104,22 +105,25 @@ def save_conversation_log(messages, session_id: str):
 
 
 def run_conversation(user_input: str, llm_config: Dict[str, Any]):
-    """Run the sequential conversation between agents."""
-    # セッションIDを生成
+    """エージェント間の対話を実行"""
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    print(f"\n=== 多エージェント対話システム ===")
+    print(f"\n=== 多エージェント対話システム（ローカルモデル版） ===")
     print(f"セッションID: {session_id}")
     print(f"ユーザー入力: {user_input}\n")
     
     # エージェントのセットアップ
-    speaker, verifier, judge = setup_agents(llm_config)
-    agents = [speaker, verifier, judge]
+    try:
+        speaker, verifier, judge = setup_agents_with_local_llm(llm_config)
+        agents = [speaker, verifier, judge]
+    except Exception as e:
+        print(f"エージェントのセットアップに失敗しました: {e}")
+        return
     
     # Sequential Workflowの作成
     group_chat, manager = create_sequential_chat(agents, max_round=6)
     
-    # ユーザープロキシ（入力を渡すだけの役割）
+    # ユーザープロキシ
     user_proxy = ConversableAgent(
         name="ユーザー",
         llm_config=False,
@@ -151,15 +155,19 @@ def run_conversation(user_input: str, llm_config: Dict[str, Any]):
 
 
 if __name__ == "__main__":
-    # 環境変数の読み込み（.envファイルがあれば）
+    # 環境変数の読み込み
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
     
-    # LLM設定の取得
-    llm_config = get_llm_config()
+    # ローカルLLM設定の取得
+    try:
+        llm_config = get_local_llm_config()
+    except FileNotFoundError as e:
+        print(f"エラー: {e}")
+        sys.exit(1)
     
     # コマンドライン引数またはデフォルトの入力
     if len(sys.argv) > 1:
