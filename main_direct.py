@@ -1,132 +1,126 @@
-"""
-直接OpenAI APIを使用した多エージェント対話システム
-AutoGenを使わずにシンプルに実装
-"""
-
 import os
-import sys
-from datetime import datetime
 import json
+import argparse
+import yaml
+from dotenv import load_dotenv
 
-def call_openai_api(messages, system_message="", model="gpt-3.5-turbo"):
-    """OpenAI APIを直接呼び出し"""
-    try:
-        import openai
-        
-        client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        
-        # システムメッセージを追加
-        full_messages = []
-        if system_message:
-            full_messages.append({"role": "system", "content": system_message})
-        full_messages.extend(messages)
-        
-        response = client.chat.completions.create(
-            model=model,
-            messages=full_messages,
-            temperature=0.7,
-            max_tokens=500
+from utils.session import SessionLogger
+from utils.json_schema import validate_json_schema
+from utils.source_resolver import resolve_queries_to_urls
+
+from providers.openai_provider import OpenAIProvider
+from providers.lmstudio_provider import LMStudioProvider
+
+
+def load_agents(path="config/agents.yaml"):
+    """YAML形式で役割定義を読み込む"""
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def build_provider(provider: str, model: str, base_url: str | None):
+    """指定されたプロバイダを初期化"""
+    if provider == "openai":
+        return OpenAIProvider(model, base_url)
+    if provider == "lmstudio":
+        return LMStudioProvider(model, base_url or "http://localhost:1234/v1")
+    raise ValueError(f"unknown provider: {provider}")
+
+
+def run(topic: str, rounds: int, provider: str, model: str, base_url: str | None, json_only: bool):
+    """メインの議論進行処理"""
+    cfg = load_agents()
+    llm = build_provider(provider, model, base_url)
+    log = SessionLogger(root="sessions")
+
+    messages = []
+    step = 0
+
+    # === 語り手 ===
+    messages = [
+        {"role": "system", "content": cfg["roles"]["storyteller"]["system"]},
+        {"role": "user", "content": topic}
+    ]
+    out_story = llm.complete(messages, temperature=cfg["roles"]["storyteller"]["temperature"])
+    log.save_step(step := step + 1, {"role": "storyteller", "output": out_story})
+
+    # === 検証者 ===
+    messages = [
+        {"role": "system", "content": cfg["roles"]["checker"]["system"]},
+        {"role": "user", "content": f"以下を厳密に検証して箇条書きで:\n{out_story}"}
+    ]
+    out_check = llm.complete(messages, temperature=cfg["roles"]["checker"]["temperature"])
+    log.save_step(step := step + 1, {"role": "checker", "output": out_check})
+
+    # === 調停者（JSON Schema準拠必須） ===
+    arb_sys = cfg["roles"]["arbiter"]["system"]
+    arb_user = f"""ユーザーのトピック: {topic}
+語り手の主張: {out_story}
+検証結果: {out_check}
+JSONのみで出力。"""
+    messages = [
+        {"role": "system", "content": arb_sys},
+        {"role": "user", "content": arb_user}
+    ]
+
+    decision = None
+    for attempt in range(5):
+        out = llm.complete(
+            messages,
+            temperature=cfg["roles"]["arbiter"]["temperature"],
+            response_format={"type": "json_object"} if provider == "openai" else None
         )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"APIエラー: {e}"
-
-
-def run_multi_agent_conversation(user_input: str):
-    """3つのエージェントによる順次対話を実行"""
-    
-    print(f"\n=== 多エージェント対話システム（直接API版） ===")
-    print(f"ユーザー入力: {user_input}\n")
-    
-    # エージェントのシステムメッセージ
-    agents = {
-        "語り手": "あなたは創造的な語り手です。大胆で自由な発想で意見を述べ、時には想像力豊かで大げさな表現も使ってください。ハルシネーションも恐れずに、議論の方向性を示してください。",
-        
-        "相槌役": "あなたは慎重な相槌役です。語り手の発言を注意深く聞き、内容を確認してください。良い点は積極的に同意し、問題がある点は建設的に指摘してください。必要に応じて「それは面白い視点ですが、実際には...」のような形で修正を提案してください。",
-        
-        "判定役": "あなたは公平な判定役です。これまでの議論を整理し、バランスの取れた結論を導いてください。語り手と相槌役の意見を両方考慮し、最終的な結論と代替案を1-2個提示してください。最後に必ず「以上で議論を終了します」と明記してください。"
-    }
-    
-    # 対話履歴
-    conversation_history = [{"role": "user", "content": user_input}]
-    responses = {}
-    
-    # 各エージェントが順番に発言
-    for agent_name, system_msg in agents.items():
-        print(f"\n[{agent_name}の発言]")
-        
-        # APIを呼び出し
-        response = call_openai_api(conversation_history, system_msg)
-        responses[agent_name] = response
-        
-        print(response)
-        print("-" * 50)
-        
-        # 履歴に追加
-        conversation_history.append({
-            "role": "assistant", 
-            "content": f"{agent_name}: {response}"
-        })
-        
-        # 判定役が終了を宣言したら終了
-        if agent_name == "判定役" and "以上で議論を終了します" in response:
+        try:
+            decision = validate_json_schema(out, "schemas/decision_v1.json")
+            log.save_step(step := step + 1, {"role": "arbiter", "output": decision})
             break
-    
-    # ログ保存
-    save_conversation_log(user_input, responses)
-    
-    print("\n=== 対話完了 ===")
-
-
-def save_conversation_log(user_input: str, responses: dict):
-    """対話ログをJSON形式で保存"""
-    log_dir = "conversation_logs"
-    os.makedirs(log_dir, exist_ok=True)
-    
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"direct_session_{session_id}.json")
-    
-    log_data = {
-        "session_id": session_id,
-        "timestamp": datetime.now().isoformat(),
-        "mode": "direct_openai_api",
-        "user_input": user_input,
-        "responses": responses
-    }
-    
-    with open(log_file, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, ensure_ascii=False, indent=2)
-    
-    print(f"\n対話ログを保存しました: {log_file}")
-
-
-def main():
-    """メイン実行関数"""
-    # 環境変数読み込み
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-    
-    # OpenAI APIキーの確認
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("警告: OPENAI_API_KEY が設定されていません。")
-        print(".envファイルでAPIキーを設定してください。")
-        print("例: OPENAI_API_KEY=sk-...")
-        return
-    
-    # 入力取得
-    if len(sys.argv) > 1:
-        user_input = " ".join(sys.argv[1:])
+        except Exception as e:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "直前の出力はスキーマ違反です。修正して再出力。\n"
+                    f"エラー: {e}\n"
+                    "必須条件: actions>=1, risks>=1, sources>=1。\n"
+                    "sources は checker の EvidencePlan をもとに {\"query\":\"...\"} 形式でも良い。\n"
+                    "JSONのみを返し、不要な文章は書かない。"
+                )
+            })
     else:
-        user_input = input("議論したいトピックを入力してください: ")
-    
-    # 対話実行
-    run_multi_agent_conversation(user_input)
+        raise RuntimeError("decision_v1 に適合できませんでした")
+
+    # === ポスト処理：sources が query のままなら URL 解決を試みる ===
+    try:
+        if any(isinstance(s, dict) and "query" in s for s in decision.get("sources", [])):
+            enriched = dict(decision)
+            enriched["sources"] = resolve_queries_to_urls(enriched["sources"], max_per_query=1)
+            log.save_step(step := step + 1, {"role": "postprocess", "output": {"enriched_sources": enriched["sources"]}})
+            decision = enriched
+    except Exception as e:
+        # 失敗しても処理継続（ログだけ残す）
+        log.save_step(step := step + 1, {"role": "postprocess", "error": f"source resolve failed: {e}"} )
+
+    # === 出力 ===
+    if json_only:
+        print(json.dumps(decision, ensure_ascii=False, indent=2))
+    else:
+        print("=== 結論 ===\n", decision["summary"])
+        print("\n[推奨アクション]")
+        for a in decision.get("actions", []):
+            print("-", a)
 
 
 if __name__ == "__main__":
-    main()
+    load_dotenv()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("topic", nargs="?", help="議論したいトピック")
+    ap.add_argument("--rounds", type=int, default=1)
+    ap.add_argument("--provider", default=os.getenv("PROVIDER", "openai"))
+    ap.add_argument("--model", default=os.getenv("MODEL_NAME", "gpt-4o-mini"))
+    ap.add_argument("--base-url", default=os.getenv("BASE_URL"))
+    ap.add_argument("--json-only", action="store_true")
+    args = ap.parse_args()
+
+    if not args.topic:
+        args.topic = input("議論したいトピックを入力してください: ")
+
+    run(args.topic, args.rounds, args.provider, args.model, args.base_url, args.json_only)
