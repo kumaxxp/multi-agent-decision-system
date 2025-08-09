@@ -1,13 +1,7 @@
-# Multi-Agent Decision System Dependencies
+# Multi-Agent Decision System - Minimal Dependencies
 
-# AutoGen - Microsoft's multi-agent framework (Python 3.12 compatible)
-pyautogen
+# OpenAI API client
+openai>=1.0.0
 
-# LLM Integration
-openai
-
-# Local Model Support (GGUF files)
-llama-cpp-python
-
-# Utilities
-python-dotenv
+# Environment variables
+python-dotenv>=1.0.0
